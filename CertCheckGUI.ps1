@@ -1,25 +1,9 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
-Add-Type -TypeDefinition @"
-using System;
-using System.Threading.Tasks;
-
-public class TimeoutHandler
-{
-    public static object InvokeWithTimeout(Action action, int timeout)
-    {
-        var task = Task.Factory.StartNew(action);
-        if (task.Wait(timeout))
-            return task.Result;
-        else
-            throw new TimeoutException();
-    }
-}
-"@ -ReferencedAssemblies "System.Runtime"
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Certificate Checker GUI"
+$form.Text = "SSL Certificate Checker GUI"
 $form.Size = New-Object System.Drawing.Size(600, 420)
 $form.StartPosition = "CenterScreen"
 
@@ -34,7 +18,7 @@ function CheckSSLCertificate {
     param (
         [string]$FQDN
     )
-    
+
     DisableSSLValidation
 
     $details = [pscustomobject]@{
@@ -47,73 +31,53 @@ function CheckSSLCertificate {
     }
 
     try {
-        # Extract hostname and port if specified
         $uri = New-Object System.UriBuilder -ArgumentList "https://$FQDN"
         $hostname = $uri.Host
         $port = if ($uri.Port -ne 443) { $uri.Port } else { 443 }
-        
-        $tcpClient = New-Object System.Net.Sockets.TcpClient($hostname, $port)
-        $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, {
-            param (
-                $sender,
-                $certificate,
-                $chain,
-                $sslPolicyErrors
-            )
-            $true
-        })
-        
-        $sslStream.AuthenticateAsClient($hostname)
-        
-        $certificate = $sslStream.RemoteCertificate
 
-        if ($certificate) {
-            $details.Issuer = $certificate.Issuer
-            $details.IssueDate = [datetime]::Parse($certificate.GetEffectiveDateString()).ToString("yyyy-MM-dd")
-            $details.ExpiryDate = [datetime]::Parse($certificate.GetExpirationDateString()).ToString("yyyy-MM-dd")
-            $details.Thumbprint = $certificate.GetCertHashString()
-            $validDate = [datetime]::Parse($certificate.GetExpirationDateString())
+        $cancellationTokenSource = [System.Threading.CancellationTokenSource]::new()
+        $cancellationTokenSource.CancelAfter(10000) # 10 seconds
 
-            $details.Status = if ($validDate -gt (Get-Date)) { "Valid" } else { "Expired" }
-        }
+        $task = [System.Threading.Tasks.Task]::Run({
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $tcpClient.Connect($hostname, $port)
 
-        $sslStream.Close()
-        $tcpClient.Close()
-    } catch {
+            $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, {
+                param ( $sender, $certificate, $chain, $sslPolicyErrors )
+                $true
+            })
+
+            $sslStream.AuthenticateAsClient($hostname)
+            $certificate = $sslStream.RemoteCertificate
+
+            if ($certificate) {
+                $details.Issuer = $certificate.Issuer
+                $details.IssueDate = [datetime]::Parse($certificate.GetEffectiveDateString()).ToString("yyyy-MM-dd")
+                $details.ExpiryDate = [datetime]::Parse($certificate.GetExpirationDateString()).ToString("yyyy-MM-dd")
+                $details.Thumbprint = $certificate.GetCertHashString()
+                $validDate = [datetime]::Parse($certificate.GetExpirationDateString())
+                $details.Status = if ($validDate -gt (Get-Date)) { "Valid" } else { "Expired" }
+            }
+
+            $sslStream.Close()
+            $tcpClient.Close()
+
+        }, $cancellationTokenSource.Token)
+
+        $task.Wait($cancellationTokenSource.Token)
+    }
+    catch [System.OperationCanceledException] {
+        $details.Status = "Error: Timeout"
+    }
+    catch {
         $details.Status = "Error: $($_.Exception.Message)"
     }
 
     return $details
 }
 
-# Function to add timeout capability to an action
-function Invoke-CommandWithTimeout {
-    param (
-        [ScriptBlock]$Command,
-        [int]$TimeoutMilliseconds = 10000
-    )
-
-    $asyncResult = $Command.BeginInvoke()
-    $completed = $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)
-
-    if (!$completed) {
-        # Close the handle to clean up
-        $asyncResult.AsyncWaitHandle.Close()
-        return [pscustomobject]@{
-            FQDN       = $Command.ToString()
-            Issuer     = 'NA'
-            IssueDate  = 'NA'
-            ExpiryDate = 'NA'
-            Thumbprint = 'NA'
-            Status     = "Timeout after $TimeoutMilliseconds milliseconds"
-        }
-    }
-
-    $result = $Command.EndInvoke($asyncResult)
-    return $result
-}
-
 # GUI components setup
+
 $browseInputButton = New-Object System.Windows.Forms.Button
 $browseInputButton.Location = New-Object System.Drawing.Point(10, 10)
 $browseInputButton.Size = New-Object System.Drawing.Size(150, 23)
@@ -122,7 +86,6 @@ $browseInputButton.Add_Click({
     $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
     $openFileDialog.InitialDirectory = [System.Environment]::GetFolderPath("Desktop")
     $openFileDialog.Filter = "CSV files (*.csv)|*.csv"
-    
     if ($openFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $inputTextbox.Text = $openFileDialog.FileName
     }
@@ -137,7 +100,6 @@ $browseOutputButton.Add_Click({
     $saveFileDialog = New-Object System.Windows.Forms.SaveFileDialog
     $saveFileDialog.InitialDirectory = [System.Environment]::GetFolderPath("Desktop")
     $saveFileDialog.Filter = "CSV files (*.csv)|*.csv"
-    
     if ($saveFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $outputTextbox.Text = $saveFileDialog.FileName
     }
@@ -177,15 +139,14 @@ $checkButton.Add_Click({
 
     foreach ($domain in $domains) {
         $cleanDomain = $domain.FQDN -replace "^https://", "" -replace "^http://", ""
-        $status = Invoke-CommandWithTimeout -Command { CheckSSLCertificate -FQDN $cleanDomain } -TimeoutMilliseconds 10000
+        $status = CheckSSLCertificate -FQDN $cleanDomain
         $results += $status
-    }
 
-    if ($verboseCheckbox.Checked) {
-        $results | ForEach-Object {
-            $verboseOutputTextbox.AppendText("FQDN: $($_.FQDN)`r`nIssuer: $($_.Issuer)`r`nIssue Date: $($_.IssueDate)`r`nExpiry Date: $($_.ExpiryDate)`r`nThumbprint: $($_.Thumbprint)`r`nStatus: $($_.Status)`r`n`r`n")
+        if ($verboseCheckbox.Checked) {
+            $verboseOutputTextbox.AppendText("FQDN: $($status.FQDN)`r`nIssuer: $($status.Issuer)`r`nIssue Date: $($status.IssueDate)`r`nExpiry Date: $($status.ExpiryDate)`r`nThumbprint: $($status.Thumbprint)`r`nStatus: $($status.Status)`r`n`r`n")
         }
     }
+
     $results | Export-Csv -Path $outputTextbox.Text -NoTypeInformation
     [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved.")
 })
@@ -195,8 +156,7 @@ $form.Controls.Add($checkButton)
 $authorLabel = New-Object System.Windows.Forms.Label
 $authorLabel.Location = New-Object System.Drawing.Point(10, 340)
 $authorLabel.Size = New-Object System.Drawing.Size(570, 25)
-$authorLabel.Text = "Written by GPT-4o, in spite of the utterly useless assistance of a human meatbag. 
-The input CSV column must be labeled FQDN, and port numbers are supported (e.g., domain.com.au:8443)."
+$authorLabel.Text = "Written by GPT-4o, in spite of the utterly useless assistance of a human meatbag. The input CSV column must be labeled FQDN, and port numbers are supported (e.g., domain.com.au:8443)."
 $form.Controls.Add($authorLabel)
 
 $form.ShowDialog()

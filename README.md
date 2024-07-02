@@ -37,7 +37,7 @@ GUI-based SSL Certificate Checker and Validator using PowerShell. Check the SSL 
 
 ## Usage
 
-1. Create a CSV with a single column labelled "FQDN"
+1. Create a MS-DOS CSV with a single column labelled "FQDN"
 2. Click on the "Browse Input CSV" button to select the CSV file containing the domains.
 3. Click on the "Browse Output CSV" button to select the destination for the output file.
 4. Optionally, check the "Enable Verbose Output" for more detailed information.
