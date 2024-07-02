@@ -5,79 +5,70 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "SSL Certificate Checker GUI"
 $form.Size = New-Object System.Drawing.Size(600, 420)
-$form.StartPosition = "CenterScreen"
+$form.StartPosition = 'CenterScreen'
 
-function DisableSSLValidation {
-    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
-        param($sender, $certificate, $chain, $sslPolicyErrors)
-        return $true
-    }
-}
+$scriptBlock = {
+    param([string]$FQDN)
 
-function CheckSSLCertificate {
-    param (
-        [string]$FQDN
-    )
-
-    DisableSSLValidation
-
-    $details = [pscustomobject]@{
-        FQDN      = $FQDN
-        Issuer    = "NA"
-        IssueDate = "NA"
-        ExpiryDate= "NA"
-        Thumbprint= "NA"
-        Status    = "Error"
+    function DisableSSLValidation { 
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
     }
 
-    try {
-        $uri = New-Object System.UriBuilder -ArgumentList "https://$FQDN"
-        $hostname = $uri.Host
-        $port = if ($uri.Port -ne 443) { $uri.Port } else { 443 }
+    function CheckSSLCertificate {
+        param([string]$FQDN)
 
-        $cancellationTokenSource = [System.Threading.CancellationTokenSource]::new()
-        $cancellationTokenSource.CancelAfter(10000) # 10 seconds
+        DisableSSLValidation
+        
+        $details = [pscustomobject]@{
+            FQDN       = $FQDN
+            Issuer     = 'N/A'
+            IssueDate  = 'N/A'
+            ExpiryDate = 'N/A'
+            Thumbprint = 'N/A'
+            Status     = 'Error'
+        }
 
-        $task = [System.Threading.Tasks.Task]::Run({
+        try {
+            # Extract hostname and port if specified
+            $uri = New-Object System.UriBuilder("https://$FQDN")
+            $hostname = $uri.Host
+            $port = if ($uri.Port -ne 443) { $uri.Port } else { 443 }
+
+            # Create a TCP connection
             $tcpClient = New-Object System.Net.Sockets.TcpClient
             $tcpClient.Connect($hostname, $port)
 
-            $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, {
-                param ( $sender, $certificate, $chain, $sslPolicyErrors )
-                $true
-            })
+            # Establish SSL stream
+            $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, ({$true}))
 
             $sslStream.AuthenticateAsClient($hostname)
+
+            # Retrieve certificate details
             $certificate = $sslStream.RemoteCertificate
 
-            if ($certificate) {
+            if ($certificate -ne $null) {
                 $details.Issuer = $certificate.Issuer
-                $details.IssueDate = [datetime]::Parse($certificate.GetEffectiveDateString()).ToString("yyyy-MM-dd")
-                $details.ExpiryDate = [datetime]::Parse($certificate.GetExpirationDateString()).ToString("yyyy-MM-dd")
+                $details.IssueDate = [datetime]::Parse($certificate.GetEffectiveDateString()).ToString('yyyy-MM-dd')
+                $details.ExpiryDate = [datetime]::Parse($certificate.GetExpirationDateString()).ToString('yyyy-MM-dd')
                 $details.Thumbprint = $certificate.GetCertHashString()
                 $validDate = [datetime]::Parse($certificate.GetExpirationDateString())
-                $details.Status = if ($validDate -gt (Get-Date)) { "Valid" } else { "Expired" }
+
+                $details.Status = if ($validDate -gt [datetime]::Now) { 'Valid' } else { 'Expired' }
             }
 
             $sslStream.Close()
             $tcpClient.Close()
+        } catch {
+            $details.Status = "Error: $_"
+        }
 
-        }, $cancellationTokenSource.Token)
-
-        $task.Wait($cancellationTokenSource.Token)
-    }
-    catch [System.OperationCanceledException] {
-        $details.Status = "Error: Timeout"
-    }
-    catch {
-        $details.Status = "Error: $($_.Exception.Message)"
+        return $details
     }
 
-    return $details
+    CheckSSLCertificate -FQDN $FQDN
 }
 
 # GUI components setup
-
 $browseInputButton = New-Object System.Windows.Forms.Button
 $browseInputButton.Location = New-Object System.Drawing.Point(10, 10)
 $browseInputButton.Size = New-Object System.Drawing.Size(150, 23)
@@ -111,6 +102,11 @@ $inputTextbox.Location = New-Object System.Drawing.Point(170, 10)
 $inputTextbox.Size = New-Object System.Drawing.Size(310, 23)
 $form.Controls.Add($inputTextbox)
 
+$outputTextbox = New-Object System.Windows.Forms.TextBox
+$outputTextbox.Location = New-Object System.Drawing.Point(170, 40)
+$outputTextbox.Size = New-Object System.Drawing.Size(310, 23)
+$form.Controls.Add($outputTextbox)
+
 $verboseCheckbox = New-Object System.Windows.Forms.CheckBox
 $verboseCheckbox.Location = New-Object System.Drawing.Point(10, 100)
 $verboseCheckbox.Size = New-Object System.Drawing.Size(470, 23)
@@ -124,11 +120,6 @@ $verboseOutputTextbox.Multiline = $true
 $verboseOutputTextbox.ScrollBars = "Vertical"
 $form.Controls.Add($verboseOutputTextbox)
 
-$outputTextbox = New-Object System.Windows.Forms.TextBox
-$outputTextbox.Location = New-Object System.Drawing.Point(170, 40)
-$outputTextbox.Size = New-Object System.Drawing.Size(310, 23)
-$form.Controls.Add($outputTextbox)
-
 $checkButton = New-Object System.Windows.Forms.Button
 $checkButton.Location = New-Object System.Drawing.Point(10, 70)
 $checkButton.Size = New-Object System.Drawing.Size(470, 23)
@@ -138,17 +129,32 @@ $checkButton.Add_Click({
     $results = @()
 
     foreach ($domain in $domains) {
-        $cleanDomain = $domain.FQDN -replace "^https://", "" -replace "^http://", ""
-        $status = CheckSSLCertificate -FQDN $cleanDomain
-        $results += $status
+    $cleanDomain = $domain.FQDN -replace "https://", "" -replace "http://", ""
+    $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $cleanDomain
 
-        if ($verboseCheckbox.Checked) {
-            $verboseOutputTextbox.AppendText("FQDN: $($status.FQDN)`r`nIssuer: $($status.Issuer)`r`nIssue Date: $($status.IssueDate)`r`nExpiry Date: $($status.ExpiryDate)`r`nThumbprint: $($status.Thumbprint)`r`nStatus: $($status.Status)`r`n`r`n")
+    if ($job | Wait-Job -Timeout 10) {
+        $status = Receive-Job -Job $job
+    } else {
+        Stop-Job -Job $job
+        $status = [pscustomobject]@{
+            FQDN       = $cleanDomain
+            Issuer     = 'N/A'
+            IssueDate  = 'N/A'
+            ExpiryDate = 'N/A'
+            Thumbprint = 'N/A'
+            Status     = 'Error: Timeout'
         }
+    }
+    Remove-Job -Job $job
+
+    $results += $status
+    if ($verboseCheckbox.Checked) {
+        $verboseOutputTextbox.AppendText("FQDN: $($status.FQDN)`nIssuer: $($status.Issuer)`nIssue Date: $($status.IssueDate)`nExpiry Date: $($status.ExpiryDate)`nThumbprint: $($status.Thumbprint)`nStatus: $($status.Status)`n`n")
+		}
     }
 
     $results | Export-Csv -Path $outputTextbox.Text -NoTypeInformation
-    [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved.")
+    [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved")
 })
 $form.Controls.Add($checkButton)
 
@@ -156,12 +162,12 @@ $form.Controls.Add($checkButton)
 $authorLabel = New-Object System.Windows.Forms.Label
 $authorLabel.Location = New-Object System.Drawing.Point(10, 340)
 $authorLabel.Size = New-Object System.Drawing.Size(570, 25)
-$authorLabel.Text = "Written by GPT-4o, in spite of the utterly useless assistance of a human meatbag. The input CSV column must be labeled FQDN, and port numbers are supported (e.g., domain.com.au:8443)."
+$authorLabel.Text = "Written by GPT-4o, in spite of the utterly useless assistance of a human meatbag. 
+The input CSV column must be labeled FQDN, and port numbers are supported (e.g., domain.com.au:8443)."
 $form.Controls.Add($authorLabel)
 
 $form.ShowDialog()
 
 # Reset SSL certificate validation after the script runs
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
-
 Pause
