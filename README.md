@@ -10,7 +10,7 @@ GUI-based SSL Certificate Checker and Validator using PowerShell. Check the SSL 
 
 ## Screenshot
 
-![Graphical Interface](images/MainGUI.png)
+![Graphical Interface](images/MainGUI.PNG)
 
 ## Requirements
 
