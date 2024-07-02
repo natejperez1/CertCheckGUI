@@ -53,4 +53,4 @@ This project is licensed under the GPL License. See the [LICENSE](LICENSE) file 
 
 ## Author
 
-Written by GPT-4o in spite of the utterly useless assistance of a human meatbag.
+Written by GPT-4o. Keyboard tapping and mouse clicking by Nate Perez

@@ -1,9 +1,25 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -TypeDefinition @"
+using System;
+using System.Threading.Tasks;
+
+public class TimeoutHandler
+{
+    public static object InvokeWithTimeout(Action action, int timeout)
+    {
+        var task = Task.Factory.StartNew(action);
+        if (task.Wait(timeout))
+            return task.Result;
+        else
+            throw new TimeoutException();
+    }
+}
+"@ -ReferencedAssemblies "System.Runtime"
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SSL Certificate Checker v4"
+$form.Text = "Certificate Checker GUI"
 $form.Size = New-Object System.Drawing.Size(600, 420)
 $form.StartPosition = "CenterScreen"
 
@@ -70,6 +86,33 @@ function CheckSSLCertificate {
     return $details
 }
 
+# Function to add timeout capability to an action
+function Invoke-CommandWithTimeout {
+    param (
+        [ScriptBlock]$Command,
+        [int]$TimeoutMilliseconds = 10000
+    )
+
+    $asyncResult = $Command.BeginInvoke()
+    $completed = $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)
+
+    if (!$completed) {
+        # Close the handle to clean up
+        $asyncResult.AsyncWaitHandle.Close()
+        return [pscustomobject]@{
+            FQDN       = $Command.ToString()
+            Issuer     = 'NA'
+            IssueDate  = 'NA'
+            ExpiryDate = 'NA'
+            Thumbprint = 'NA'
+            Status     = "Timeout after $TimeoutMilliseconds milliseconds"
+        }
+    }
+
+    $result = $Command.EndInvoke($asyncResult)
+    return $result
+}
+
 # GUI components setup
 $browseInputButton = New-Object System.Windows.Forms.Button
 $browseInputButton.Location = New-Object System.Drawing.Point(10, 10)
@@ -134,13 +177,15 @@ $checkButton.Add_Click({
 
     foreach ($domain in $domains) {
         $cleanDomain = $domain.FQDN -replace "^https://", "" -replace "^http://", ""
-        $status = CheckSSLCertificate -FQDN $cleanDomain
+        $status = Invoke-CommandWithTimeout -Command { CheckSSLCertificate -FQDN $cleanDomain } -TimeoutMilliseconds 10000
         $results += $status
-        if ($verboseCheckbox.Checked) {
-            $verboseOutputTextbox.AppendText("FQDN: $($status.FQDN)`r`nIssuer: $($status.Issuer)`r`nIssue Date: $($status.IssueDate)`r`nExpiry Date: $($status.ExpiryDate)`r`nThumbprint: $($status.Thumbprint)`r`nStatus: $($status.Status)`r`n`r`n")
-        }
     }
 
+    if ($verboseCheckbox.Checked) {
+        $results | ForEach-Object {
+            $verboseOutputTextbox.AppendText("FQDN: $($_.FQDN)`r`nIssuer: $($_.Issuer)`r`nIssue Date: $($_.IssueDate)`r`nExpiry Date: $($_.ExpiryDate)`r`nThumbprint: $($_.Thumbprint)`r`nStatus: $($_.Status)`r`n`r`n")
+        }
+    }
     $results | Export-Csv -Path $outputTextbox.Text -NoTypeInformation
     [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved.")
 })
