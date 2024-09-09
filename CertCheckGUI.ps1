@@ -4,7 +4,7 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "SSL Certificate Checker GUI"
-$form.Size = New-Object System.Drawing.Size(600, 420)
+$form.Size = New-Object System.Drawing.Size(600, 450)
 $form.StartPosition = 'CenterScreen'
 
 $scriptBlock = {
@@ -29,21 +29,17 @@ $scriptBlock = {
         }
 
         try {
-            # Extract hostname and port if specified
             $uri = New-Object System.UriBuilder("https://$FQDN")
             $hostname = $uri.Host
             $port = if ($uri.Port -ne 443) { $uri.Port } else { 443 }
 
-            # Create a TCP connection
             $tcpClient = New-Object System.Net.Sockets.TcpClient
             $tcpClient.Connect($hostname, $port)
 
-            # Establish SSL stream
             $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, ({$true}))
 
             $sslStream.AuthenticateAsClient($hostname)
 
-            # Retrieve certificate details
             $certificate = $sslStream.RemoteCertificate
 
             if ($certificate -ne $null) {
@@ -125,40 +121,65 @@ $checkButton.Location = New-Object System.Drawing.Point(10, 70)
 $checkButton.Size = New-Object System.Drawing.Size(470, 23)
 $checkButton.Text = "Check SSL Certificates and Save Results"
 $checkButton.Add_Click({
-    $domains = Import-Csv -Path $inputTextbox.Text
-    $results = @()
+    # Asynchronous processing using Runspaces
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.Open()
+    $pipeline = $runspace.CreatePipeline()
 
-    foreach ($domain in $domains) {
-    $cleanDomain = $domain.FQDN -replace "https://", "" -replace "http://", ""
-    $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $cleanDomain
+    $script = {
+        param($inputPath, $outputPath, $verboseChecked, $verboseBox, $scriptBlock)
 
-    if ($job | Wait-Job -Timeout 10) {
-        $status = Receive-Job -Job $job
-    } else {
-        Stop-Job -Job $job
-        $status = [pscustomobject]@{
-            FQDN       = $cleanDomain
-            Issuer     = 'N/A'
-            IssueDate  = 'N/A'
-            ExpiryDate = 'N/A'
-            Thumbprint = 'N/A'
-            Status     = 'Error: Timeout'
+        $domains = Import-Csv -Path $inputPath
+        $results = @()
+
+        foreach ($domain in $domains) {
+            $cleanDomain = $domain.FQDN -replace "^https://", "" -replace "^http://", ""
+            $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $cleanDomain
+            
+            if ($job | Wait-Job -Timeout 2) {
+                $status = Receive-Job -Job $job
+            } else {
+                Stop-Job -Job $job
+                $status = [pscustomobject]@{
+                    FQDN       = $cleanDomain
+                    Issuer     = 'N/A'
+                    IssueDate  = 'N/A'
+                    ExpiryDate = 'N/A'
+                    Thumbprint = 'N/A'
+                    Status     = 'Error: Timeout'
+                }
+            }
+            Remove-Job -Job $job
+
+            $status.PSObject.Properties.Remove("PSComputerName")
+            $status.PSObject.Properties.Remove("RunspaceId")
+            $status.PSObject.Properties.Remove("PSShowComputerName")
+
+            $results += $status
+
+            if ($verboseChecked -eq $true) {
+                $entry = "FQDN: $($status.FQDN)`r`nIssuer: $($status.Issuer)`r`nIssue Date: $($status.IssueDate)`r`nExpiry Date: $($status.ExpiryDate)`r`nThumbprint: $($status.Thumbprint)`r`nStatus: $($status.Status)`r`n`r`n"
+                $verboseBox.BeginInvoke([System.Windows.Forms.MethodInvoker]{
+                    $verboseBox.AppendText($entry)
+                })
+            }
         }
-    }
-    Remove-Job -Job $job
 
-    $results += $status
-    if ($verboseCheckbox.Checked) {
-        $verboseOutputTextbox.AppendText("FQDN: $($status.FQDN)`nIssuer: $($status.Issuer)`nIssue Date: $($status.IssueDate)`nExpiry Date: $($status.ExpiryDate)`nThumbprint: $($status.Thumbprint)`nStatus: $($status.Status)`n`n")
-		}
+        $results | Export-Csv -Path $outputPath -NoTypeInformation
+        [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved")
     }
 
-    $results | Export-Csv -Path $outputTextbox.Text -NoTypeInformation
-    [System.Windows.Forms.MessageBox]::Show("SSL certificate check completed and results saved")
+    $pipeline.Commands.AddScript($script)
+    $pipeline.Commands[0].Parameters.Add("inputPath", $inputTextbox.Text)
+    $pipeline.Commands[0].Parameters.Add("outputPath", $outputTextbox.Text)
+    $pipeline.Commands[0].Parameters.Add("verboseChecked", $verboseCheckbox.Checked)
+    $pipeline.Commands[0].Parameters.Add("verboseBox", $verboseOutputTextbox)
+    $pipeline.Commands[0].Parameters.Add("scriptBlock", $scriptBlock)
+    $pipeline.InvokeAsync()
 })
 $form.Controls.Add($checkButton)
 
-# Author credit label
+# Author Credit Label
 $authorLabel = New-Object System.Windows.Forms.Label
 $authorLabel.Location = New-Object System.Drawing.Point(10, 340)
 $authorLabel.Size = New-Object System.Drawing.Size(570, 25)
